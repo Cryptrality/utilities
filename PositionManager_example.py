@@ -21,6 +21,8 @@ def handler(state, data):
     balance_quoted = portfolio.excess_liquidity_quoted
     # we invest only 80% of available liquidity    
     position_manager.set_value(float(balance_quoted) * 0.80)
+    # print(position_manager.has_position)
+    # print(position_manager.position)
 
     if current_price < bbands_lower and not position_manager.has_position:
         print("-------")
@@ -116,6 +118,7 @@ class PositionManager:
         #TODO self.check_if_pending()
         if not self.has_position and not self.is_pending:
             self.position_data[self.symbol] = {}
+            state.positions_manager[self.symbol] = {}
     
     def set_value(self, value):
         try:
@@ -163,9 +166,9 @@ class PositionManager:
                     self.symbol, amount, take_profit, subtract_fees=subtract_fees)
                 stop_orders["order_lower"] = order_stop_loss(
                     self.symbol, amount, stop_loss, subtract_fees=subtract_fees)
-            if order_upper.status != OrderStatus.Pending:
+            if stop_orders["order_upper"].status != OrderStatus.Pending:
                 errmsg = "make_double barrier failed with: {}"
-                raise ValueError(errmsg.format(order_upper.error))
+                raise ValueError(errmsg.format(stop_orders["order_upper"].error))
             self.position_data["stop_orders"] = stop_orders
         else:
             print("Stop orders already exist")
@@ -175,6 +178,7 @@ class PositionManager:
             amount = float(self.position_data["buy_order"].quantity)
         except Exception:
             amount = None
+        return amount
     
     def cancel_stop_orders(self):
         try:
