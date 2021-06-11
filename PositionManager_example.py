@@ -2,7 +2,7 @@ def initialize(state):
     state.number_offset_trades = 0;
 
 
-@schedule(interval="1h", symbol="BTCUSDT")
+@schedule(interval="15m", symbol="BTCUSDT")
 def handler(state, data):
 
     bbands = data.bbands(20, 2)
@@ -16,13 +16,14 @@ def handler(state, data):
 
     current_price = data.close_last
 
-    position_manager = PositionManager(state, data.symbol)
+    position_manager = PositionManager(state, data.symbol, data.last_time)
     portfolio = query_portfolio()
     balance_quoted = portfolio.excess_liquidity_quoted
     # we invest only 80% of available liquidity    
     position_manager.set_value(float(balance_quoted) * 0.80)
     # print(position_manager.has_position)
     # print(position_manager.position)
+    print(state)
 
     if current_price < bbands_lower and not position_manager.has_position:
         print("-------")
@@ -97,7 +98,7 @@ class PositionManager:
     """
 
 
-    def __init__(self, state, symbol, include_dust=False):
+    def __init__(self, state, symbol, timestamp, include_dust=False):
         position = query_open_position_by_symbol(
             symbol, include_dust=include_dust)
         self.symbol = symbol
@@ -105,20 +106,23 @@ class PositionManager:
         self.has_position = position is not None
         self.is_pending = False
         try:
-            saved_pos = state.positions_manager[self.symbol]
+            self.position_data = state.positions_manager[self.symbol]
         except TypeError:
-            saved_pos = {}
             state.positions_manager = {}
+            state.summary_performance = {}
             state.positions_manager[self.symbol] = {}
+            state.summary_performance[self.symbol] = {
+                "positions": [], "winning": 0, "tot": 0, "pnl": 0}
+            self.position_data = state.positions_manager[self.symbol]
         except KeyError:
-            saved_pos = {}
             state.positions_manager[self.symbol] = {}
-        self.position_data = saved_pos
+            self.position_data = state.positions_manager[self.symbol]
         #TODO self.check_if_waiting()
         #TODO self.check_if_pending()
         if not self.has_position and not self.is_pending:
-            self.position_data[self.symbol] = {}
+            #self.position_data = {}
             state.positions_manager[self.symbol] = {}
+            self.position_data = state.positions_manager[self.symbol]
     
     def set_value(self, value):
         try:
@@ -149,7 +153,8 @@ class PositionManager:
             self.cancel_stop_orders()
             self.position_data = {}
             # cleanup state
-    
+
+
     def double_barrier(self, take_profit, stop_loss, subtract_fees=False):
         try:
             stop_orders = self.position_data["stop_orders"]
