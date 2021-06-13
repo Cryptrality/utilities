@@ -24,6 +24,10 @@ def handler(state, data):
     # print(position_manager.has_position)
     # print(position_manager.position)
     print(state)
+    try:
+        print(state.positions_manager[data.symbol]["summary"])
+    except Exception:
+        pass
 
     if current_price < bbands_lower and not position_manager.has_position:
         print("-------")
@@ -35,7 +39,7 @@ def handler(state, data):
     elif current_price > bbands_upper and position_manager.has_position:
         print("-------")
         logmsg = "Sell Signal: closing {} position with exposure {} at current market price {}"
-        print(logmsg.format(data.symbol,float(position_manager.position.exposure),data.close_last))
+        print(logmsg.format(data.symbol,float(position_manager.position_exposure()),data.close_last))
 
         position_manager.close_market()
 
@@ -102,27 +106,46 @@ class PositionManager:
         position = query_open_position_by_symbol(
             symbol, include_dust=include_dust)
         self.symbol = symbol
-        self.position = position
         self.has_position = position is not None
         self.is_pending = False
         try:
-            self.position_data = state.positions_manager[self.symbol]
+            self.position_data = state.positions_manager[self.symbol]["data"]
         except TypeError:
             state.positions_manager = {}
-            state.summary_performance = {}
-            state.positions_manager[self.symbol] = {}
-            state.summary_performance[self.symbol] = {
-                "positions": [], "winning": 0, "tot": 0, "pnl": 0}
-            self.position_data = state.positions_manager[self.symbol]
+            state.positions_manager[self.symbol] = {
+                "data": self.default_data(),
+                "summary": {
+                    "positions": [], "winning": 0, "tot": 0, "pnl": 0}}
+            self.position_data = state.positions_manager[self.symbol]["data"]
         except KeyError:
-            state.positions_manager[self.symbol] = {}
-            self.position_data = state.positions_manager[self.symbol]
+            state.positions_manager[self.symbol] = {
+                "data": self.default_data(),
+                "summary": {
+                    "positions": [], "winning": 0, "tot": 0, "pnl": 0}}
+            self.position_data = state.positions_manager[self.symbol]["data"]
+        if self.has_position:
+            self.position_data["position"] = position
         #TODO self.check_if_waiting()
         #TODO self.check_if_pending()
         if not self.has_position and not self.is_pending:
-            #self.position_data = {}
-            state.positions_manager[self.symbol] = {}
-            self.position_data = state.positions_manager[self.symbol]
+            try:
+                closed_position = self.position_data["position"]
+            except KeyError:
+                closed_position = None
+            if closed_position is not None:
+                closed_position = query_position_by_id(closed_position.id)
+                pnl = float(closed_position.realized_pnl)
+                if pnl > 0:
+                     state.positions_manager[self.symbol]["summary"]['winning'] += 1
+                state.positions_manager[self.symbol]["summary"]['tot'] += 1
+                state.positions_manager[self.symbol]["summary"]['pnl'] += pnl
+            #self.position_data = self.default_data()
+            print("reset data")
+            state.positions_manager[self.symbol]["data"] = self.default_data()
+            self.position_data = state.positions_manager[self.symbol]["data"]
+            print(self.position_data)
+            print(state)
+            print("BBBBB")
     
     def set_value(self, value):
         try:
@@ -144,6 +167,7 @@ class PositionManager:
             buy_order = order_market_value(
                 symbol=self.symbol, value=self.position_value)
             self.position_data["buy_order"] = buy_order
+            #self.__update_state__()
         else:
             print("Buy order already placed")
     
@@ -175,6 +199,7 @@ class PositionManager:
                 errmsg = "make_double barrier failed with: {}"
                 raise ValueError(errmsg.format(stop_orders["order_upper"].error))
             self.position_data["stop_orders"] = stop_orders
+            #self.__update_state__()
         else:
             print("Stop orders already exist")
 
@@ -184,6 +209,13 @@ class PositionManager:
         except Exception:
             amount = None
         return amount
+
+    def position_exposure(self):
+        try:
+            exposure = float(self.position_data["position"].exposure)
+        except KeyError:
+            exposure = None
+        return exposure       
     
     def cancel_stop_orders(self):
         try:
@@ -199,4 +231,12 @@ class PositionManager:
                 except Exception:
                     pass
         self.position_data["stop_orders"] = stop_orders
+    
+    def default_data(self):
+        return {
+            "stop_orders": {"order_upper": None, "order_lower": None},
+            "position": None,
+            "buy_order": None,
+            "value": None
+        }
 
