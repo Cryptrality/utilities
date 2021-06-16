@@ -1,11 +1,13 @@
 def initialize(state):
     state.number_offset_trades = 0;
+    state.next_atr_price = [None, None]
 
 
 @schedule(interval="15m", symbol="BTCUSDT")
 def handler(state, data):
 
     bbands = data.bbands(20, 2)
+    atr = data.atr(14).last
     
     # on erronous data return early (indicators are of NoneType)
     if bbands is None:
@@ -15,6 +17,8 @@ def handler(state, data):
     bbands_upper = bbands["bbands_upper"].last
 
     current_price = data.close_last
+    stop_loss = atr_to_percent(current_price, 6, atr)
+    take_profit = atr_to_percent(current_price, 6, atr)
 
     position_manager = PositionManager(state, data.symbol, data.last_time)
     portfolio = query_portfolio()
@@ -23,13 +27,37 @@ def handler(state, data):
     position_manager.set_value(float(balance_quoted) * 0.80)
     # print(position_manager.has_position)
     # print(position_manager.position)
+    if position_manager.has_position and state.next_atr_price[0] < current_price:
+        if state.next_atr_price[1] > 1:
+            new_n = state.next_atr_price[1] - 1
+            next_step = current_price + (1 * atr)
+            new_stop_loss = atr_to_percent(current_price, atr, n=new_n)
+            print("advance stop loss to %i atr" % new_n)
+            position_manager.update_double_barrier(current_price, None, new_stop_loss)
+            state.next_atr_price[0] = next_step
+            state.next_atr_price[1] = new_n
+
+    try:
+        tp_price = position_manager.position_data[
+            "stop_orders"]["order_upper"].stop_price
+        sl_price = position_manager.position_data[
+            "stop_orders"]["order_lower"].stop_price
+        with PlotScope.root(position_manager.symbol):
+            plot("tp", tp_price)
+            plot("sl", sl_price)
+    except Exception:
+        pass
 
     if current_price < bbands_lower and not position_manager.has_position:
         print("-------")
         print("Buy Signal: creating market order for {}".format(data.symbol))
         print("Buy value: ", position_manager.position_value, " at current market price: ", data.close_last)
         position_manager.open_market()
-        position_manager.double_barrier(0.01, 0.1)
+        position_manager.double_barrier(take_profit, stop_loss)
+        next_step = current_price + (1 * atr)
+
+        state.next_atr_price[0] = next_step
+        state.next_atr_price[1] = 6
 
     elif current_price > bbands_upper and position_manager.has_position:
         print("-------")
@@ -220,6 +248,20 @@ class PositionManager:
             if take_profit.is_filled():
                 return {"side": "take_profit", "order": take_profit}
 
+    def update_double_barrier(self, current_price, take_profit=None, stop_loss=None, subtract_fees=False):
+        if take_profit is None:
+            # keep upper as it is
+            order_upper_price = float(self.position_data[
+                "stop_orders"]["order_upper"].stop_price)
+            take_profit = abs(order_upper_price - current_price) / current_price
+        if stop_loss is None:
+            # Keep low as it is
+            order_lower_price = float(self.position_data[
+                "stop_orders"]["order_lower"].stop_price)
+            stop_loss = abs(order_lower__price - current_price) / current_price
+        self.cancel_stop_orders()
+        self.double_barrier(take_profit, stop_loss, subtract_fees=subtract_fees)
+
     def position_amount(self):
         try:
             amount = float(self.position_data["buy_order"].quantity)
@@ -267,3 +309,6 @@ class PositionManager:
             "value": None
         }
 
+def atr_to_percent(close, atr, n=6):
+    tp = close + (n * atr)
+    return abs(tp - close) / close
