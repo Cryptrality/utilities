@@ -7,7 +7,11 @@ def initialize(state):
 def handler(state, data):
 
     bbands = data.bbands(20, 2)
+    rsi = data.close.rsi(14).ema(5)
+    rsi1 = data.close.rsi(4).ema(5)
+
     atr = data.atr(14).last
+    adx = data.adx(14).last
     
     # on erronous data return early (indicators are of NoneType)
     if bbands is None:
@@ -16,9 +20,19 @@ def handler(state, data):
     bbands_lower = bbands["bbands_lower"].last
     bbands_upper = bbands["bbands_upper"].last
 
+    if adx > 25:
+        rsi_levels = [10, 90]
+    else:
+        rsi_levels = [30, 70]
     current_price = data.close_last
-    stop_loss = atr_to_percent(current_price, 6, atr)
-    take_profit = atr_to_percent(current_price, 6, atr)
+    atr_n_stop_loss = 3
+    atr_n_take_profit = 5
+    atr_decrease_steps = 1
+    stop_loss = atr_to_percent(current_price, atr_n_stop_loss, atr)
+    take_profit = atr_to_percent(current_price, atr_n_take_profit, atr)
+
+    rsi_cross_under = cross_under(rsi.select("ema")[-2:], rsi1.select("ema")[-2:])
+    rsi_cross_over = cross_over(rsi.select("ema")[-2:], rsi1.select("ema")[-2:])
 
     position_manager = PositionManager(state, data.symbol, data.last_time)
     portfolio = query_portfolio()
@@ -27,15 +41,42 @@ def handler(state, data):
     position_manager.set_value(float(balance_quoted) * 0.80)
     # print(position_manager.has_position)
     # print(position_manager.position)
+
+    with PlotScope.group("rsi_cross", position_manager.symbol):
+        plot("rsi_long", rsi.last)
+        plot("rsi_short", rsi1.last)
+
     if position_manager.has_position and state.next_atr_price[0] < current_price:
-        if state.next_atr_price[1] > 1:
-            new_n = state.next_atr_price[1] - 1
-            next_step = current_price + (1 * atr)
+        if state.next_atr_price[1] > atr_decrease_steps:
+            new_n = state.next_atr_price[1] - atr_decrease_steps
+            next_step = current_price + (atr_decrease_steps * atr)
             new_stop_loss = atr_to_percent(current_price, atr, n=new_n)
-            print("advance stop loss to %i atr" % new_n)
+            print("advance stop loss to %s atr" % new_n)
             position_manager.update_double_barrier(current_price, None, new_stop_loss)
             state.next_atr_price[0] = next_step
             state.next_atr_price[1] = new_n
+
+    if current_price < bbands_lower and not position_manager.has_position:
+         position_manager.start_waiting("buy", "waiting RSI confirmation")
+    if current_price > bbands_upper and position_manager.has_position:
+         position_manager.start_waiting("buy", "waiting RSI confirmation")
+    ## RSI rising:
+    rsi_rising = rsi1.last < rsi.last and rsi1.last > rsi1.select("ema")[-3] and rsi1.last < rsi_levels[0]
+    ## RSI landing:
+    rsi_landing = rsi1.last > rsi.last and rsi1.last < rsi1.select("ema")[-3] and rsi1.last > rsi_levels[1]
+    buy_signal = False
+    sell_signal = False
+
+    if rsi_rising and position_manager.check_if_waiting():
+        wating_data, wating_message = position_manager.waiting_data()
+        if wating_data == "buy":
+            buy_signal = True
+            position_manager.stop_waiting()
+    if rsi_landing and position_manager.check_if_waiting():
+        wating_data, wating_message = position_manager.waiting_data()
+        if wating_data == "sell":
+            sell_signal = True
+            position_manager.stop_waiting()   
 
     try:
         tp_price = position_manager.position_data[
@@ -48,18 +89,18 @@ def handler(state, data):
     except Exception:
         pass
 
-    if current_price < bbands_lower and not position_manager.has_position:
+    if buy_signal and not position_manager.has_position:
         print("-------")
         print("Buy Signal: creating market order for {}".format(data.symbol))
         print("Buy value: ", position_manager.position_value, " at current market price: ", data.close_last)
         position_manager.open_market()
         position_manager.double_barrier(take_profit, stop_loss)
-        next_step = current_price + (1 * atr)
+        next_step = current_price + (atr_decrease_steps * atr)
 
         state.next_atr_price[0] = next_step
-        state.next_atr_price[1] = 6
+        state.next_atr_price[1] = atr_n_stop_loss
 
-    elif current_price > bbands_upper and position_manager.has_position:
+    elif sell_signal and position_manager.has_position:
         print("-------")
         logmsg = "Sell Signal: closing {} position with exposure {} at current market price {}"
         print(logmsg.format(data.symbol,float(position_manager.position_exposure()),data.close_last))
@@ -150,7 +191,7 @@ class PositionManager:
             self.position_data["position"] = position
         #TODO self.check_if_waiting()
         #TODO self.check_if_pending()
-        if not self.has_position and not self.is_pending:
+        if not self.has_position and (not self.is_pending or not self.check_if_waiting()):
             if self.position_data["buy_order"] is not None:
                 try:
                     closed_position = self.position_data["position"]
@@ -301,10 +342,32 @@ class PositionManager:
                     pass
         self.position_data["stop_orders"] = stop_orders
     
+    def start_waiting(self, waiting_data=None, waiting_message=None):
+        if waiting_data:
+            self.position_data["waiting"]["data"] = waiting_data
+        if waiting_message:
+            self.position_data["waiting"]["message"] = waiting_message
+        self.position_data["waiting"]["status"] = True
+
+    def stop_waiting(self, waiting_data=None, waiting_message=None):
+        self.position_data["waiting"]["status"] = False
+
+    def check_if_waiting(self):
+        if self.position_data["waiting"]["status"] is None:
+            return False
+        else:
+            return self.position_data["waiting"]["status"]
+
+    def waiting_data(self):
+        return (
+            self.position_data["waiting"]["data"],
+            self.position_data["waiting"]["message"])
+
     def default_data(self):
         return {
             "stop_orders": {"order_upper": None, "order_lower": None},
             "position": None,
+            "waiting": {"status": None, "data": None, "message": None},
             "buy_order": None,
             "value": None
         }
@@ -312,3 +375,21 @@ class PositionManager:
 def atr_to_percent(close, atr, n=6):
     tp = close + (n * atr)
     return abs(tp - close) / close
+
+def cross_over(x, y):
+    if y[1] < x[1]:
+        return False
+    else:
+        if x[0] > y[0]:
+            return True
+        else:
+            return False
+
+def cross_under(x, y):
+    if y[1] > x[1]:
+        return False
+    else:
+        if x[0] < y[0]:
+            return True
+        else:
+            return False
