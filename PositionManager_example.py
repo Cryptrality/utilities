@@ -7,9 +7,9 @@ def initialize(state):
 def handler(state, data):
 
     bbands = data.bbands(20, 2)
-    rsi = data.close.rsi(14).ema(5)
-    rsi1 = data.close.rsi(4).ema(5)
-
+    rsi = data.close.rsi(14).ema(10)
+    rsi1 = data.close.rsi(4).ema(10)
+    ema30 = data.ema(30).last
     atr = data.atr(14).last
     adx = data.adx(14).last
     
@@ -19,14 +19,18 @@ def handler(state, data):
 
     bbands_lower = bbands["bbands_lower"].last
     bbands_upper = bbands["bbands_upper"].last
+    bbands_middle = bbands["bbands_middle"].last
 
     if adx > 25:
-        rsi_levels = [10, 90]
-    else:
         rsi_levels = [30, 70]
+    else:
+        rsi_levels = [40, 60]
     current_price = data.close_last
-    atr_n_stop_loss = 3
-    atr_n_take_profit = 5
+
+    bol_b = (current_price - bbands_lower)/(bbands_upper - bbands_lower)
+
+    atr_n_stop_loss = 1
+    atr_n_take_profit = 10
     atr_decrease_steps = 1
     stop_loss = atr_to_percent(current_price, atr_n_stop_loss, atr)
     take_profit = atr_to_percent(current_price, atr_n_take_profit, atr)
@@ -46,26 +50,30 @@ def handler(state, data):
         plot("rsi_long", rsi.last)
         plot("rsi_short", rsi1.last)
 
-    if position_manager.has_position and state.next_atr_price[0] < current_price:
-        if state.next_atr_price[1] > atr_decrease_steps:
-            new_n = state.next_atr_price[1] - atr_decrease_steps
-            next_step = current_price + (atr_decrease_steps * atr)
-            new_stop_loss = atr_to_percent(current_price, atr, n=new_n)
-            print("advance stop loss to %s atr" % new_n)
-            position_manager.update_double_barrier(current_price, None, new_stop_loss)
-            state.next_atr_price[0] = next_step
-            state.next_atr_price[1] = new_n
+    with PlotScope.group("%B", position_manager.symbol):
+        plot("%B", bol_b)        
+
+    # if position_manager.has_position and state.next_atr_price[0] < current_price:
+    #     if state.next_atr_price[1] > atr_decrease_steps:
+    #         new_n = state.next_atr_price[1] - atr_decrease_steps
+    #         next_step = current_price + (atr_decrease_steps * atr)
+    #         new_stop_loss = atr_to_percent(current_price, atr, n=new_n)
+    #         print("advance stop loss to %s atr" % new_n)
+    #         position_manager.update_double_barrier(current_price, None, new_stop_loss)
+    #         state.next_atr_price[0] = next_step
+    #         state.next_atr_price[1] = new_n
+    buy_signal = False
+    sell_signal = False
 
     if current_price < bbands_lower and not position_manager.has_position:
          position_manager.start_waiting("buy", "waiting RSI confirmation")
-    if current_price > bbands_upper and position_manager.has_position:
-         position_manager.start_waiting("buy", "waiting RSI confirmation")
+    if bol_b > 0.9 and position_manager.has_position:
+         position_manager.start_waiting("sell", "waiting RSI confirmation")
     ## RSI rising:
-    rsi_rising = rsi1.last < rsi.last and rsi1.last > rsi1.select("ema")[-3] and rsi1.last < rsi_levels[0]
+    rsi_rising = rsi1.last < rsi.last and rsi1.last > rsi1.select("ema")[-3] and rsi1.select("ema")[-3] < rsi_levels[0]
     ## RSI landing:
-    rsi_landing = rsi1.last > rsi.last and rsi1.last < rsi1.select("ema")[-3] and rsi1.last > rsi_levels[1]
-    buy_signal = False
-    sell_signal = False
+    rsi_landing = rsi1.last > rsi.last and rsi1.last < rsi1.select("ema")[-3] and rsi1.select("ema")[-3] > rsi_levels[1]
+
 
     if rsi_rising and position_manager.check_if_waiting():
         wating_data, wating_message = position_manager.waiting_data()
@@ -88,6 +96,11 @@ def handler(state, data):
             plot("sl", sl_price)
     except Exception:
         pass
+
+    if buy_signal and ema30 > bbands_middle:
+        pass
+    else:
+        buy_signal = False
 
     if buy_signal and not position_manager.has_position:
         print("-------")
@@ -127,7 +140,6 @@ def handler(state, data):
         print("Average Loss per Losing Trade : {:.2f}".format(portfolio.average_loss_per_losing_trade))
         # reset number offset trades
         state.number_offset_trades = portfolio.number_of_offsetting_trades
-
 
 class PositionManager:
     """
@@ -189,10 +201,17 @@ class PositionManager:
             self.position_data = state.positions_manager[self.symbol]["data"]
         if self.has_position:
             self.position_data["position"] = position
+            if self.position_data["buy_order"] is None:
+                # Potential manual buy or existing positions
+                # when the bot was started
+                order_id = self.position_data["position"].order_ids[-1]
+                self.position_data["buy_order"] = query_order(order_id)
+
         #TODO self.check_if_waiting()
         #TODO self.check_if_pending()
         if not self.has_position and (not self.is_pending or not self.check_if_waiting()):
             if self.position_data["buy_order"] is not None:
+                self.cancel_stop_orders()
                 try:
                     closed_position = self.position_data["position"]
                 except KeyError:
@@ -244,11 +263,15 @@ class PositionManager:
             #self.__update_state__()
         else:
             print("Buy order already placed")
-    
+        if self.check_if_waiting():
+            self.stop_waiting()
+
     def close_market(self):
         if self.has_position:
             close_position(self.symbol)
             self.cancel_stop_orders()
+        if self.check_if_waiting():
+            self.stop_waiting()
 
     def double_barrier(self, take_profit, stop_loss, subtract_fees=False):
         try:
@@ -288,6 +311,18 @@ class PositionManager:
             take_profit.refresh()
             if take_profit.is_filled():
                 return {"side": "take_profit", "order": take_profit}
+
+    def is_stop_placed(self):
+        try:
+            stop_orders = self.position_data["stop_orders"]
+            stop_loss = stop_orders["order_lower"]
+            take_profit = stop_orders["order_upper"]
+        except KeyError:
+            return False
+        if stop_loss is None and take_profit is None:
+            return False
+        else:
+            return True
 
     def update_double_barrier(self, current_price, take_profit=None, stop_loss=None, subtract_fees=False):
         if take_profit is None:
