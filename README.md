@@ -6,6 +6,10 @@ Two methods to check the state of limit orders.
 
 Enum class that works with Trality live bots. Implements `__getstate__` and `__setstate__` to work with pickling.
 
+## format_currency.py
+
+Function to format currencies, with symbols and decimal points.
+
 ## get_current_date.py
 
 Sample code to get the current date. Works in backtesting and live bot.
