@@ -1,6 +1,8 @@
 import datetime
 import pytz
 
+SYMBOLS = ["BTC-USD", "ETH-USD"]
+
 def initialize(state):
     state.timezone = pytz.timezone("America/New_York")
 
