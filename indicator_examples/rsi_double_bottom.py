@@ -7,8 +7,6 @@ RSI_TIMEOUT = 24*5
 
 @schedule(interval="1h", symbol="BTCUSDT")
 def handler(state, data):
-
-...
 # define RSI finite state machine 
     
     start_state = None
